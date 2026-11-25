@@ -5,6 +5,13 @@ Qwen-Image model (see app RunPodClient.kt): flat fields prompt /
 negative_prompt / image_url / image_base64 / width / height, plus a
 `workflow` object this worker accepts and ignores — it builds the graph
 itself in src/workflow.py, same contract as the MiniMax-H3 worker.
+
+Reference images come in two mutually exclusive forms: the single-image
+fields above (one edit base), or `ref_images` — a list of up to
+config.MAX_REF_IMAGES {"base64": ...} / {"url": ...} objects (a plain
+string item counts as base64), the same shape the app already sends to
+the H3 R2V worker. The first entry is the edit base; the rest are
+references the prompt can point at.
 """
 
 import math
@@ -24,6 +31,48 @@ def _validate_image_source(inp: dict, url_key: str, b64_key: str) -> bool:
     return has_url or has_b64
 
 
+def _validate_ref_images(inp: dict) -> list:
+    """Normalize `ref_images` to a list of {"url": ...} / {"base64": ...}.
+
+    Empty list when the field is absent. Each item is an object with
+    exactly one of url / base64, or a plain string (base64 / data URL).
+    """
+    raw = inp.get("ref_images")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValidationError(
+            "ref_images must be a list.",
+            hint='Send a list like [{"base64": "..."}, {"url": "..."}].',
+        )
+    if len(raw) > config.MAX_REF_IMAGES:
+        raise ValidationError(
+            f"ref_images accepts at most {config.MAX_REF_IMAGES} images.",
+            hint=f"You sent {len(raw)}.",
+        )
+    out = []
+    for i, item in enumerate(raw):
+        if isinstance(item, str):
+            if item.strip():
+                out.append({"base64": item})
+            continue
+        if not isinstance(item, dict):
+            raise ValidationError(
+                f"ref_images[{i}] must be an object or a base64 string.",
+            )
+        url, b64 = item.get("url"), item.get("base64")
+        if bool(url) == bool(b64):
+            raise ValidationError(
+                f"ref_images[{i}] needs exactly one of 'url' or 'base64'.",
+            )
+        if url is not None and not isinstance(url, str):
+            raise ValidationError(f"ref_images[{i}].url must be a string.")
+        if b64 is not None and not isinstance(b64, str):
+            raise ValidationError(f"ref_images[{i}].base64 must be a string.")
+        out.append({"url": url} if url else {"base64": b64})
+    return out
+
+
 def validate_input(inp: dict) -> dict:
     """Validate and normalize job input. Returns a cleaned dict with defaults applied."""
     if not isinstance(inp, dict):
@@ -32,8 +81,19 @@ def validate_input(inp: dict) -> dict:
             hint="Send a JSON object with at least a 'prompt' field.",
         )
 
-    has_image = _validate_image_source(inp, "image_url", "image_base64")
-    mode = "edit" if has_image else "t2i"
+    has_single = _validate_image_source(inp, "image_url", "image_base64")
+    ref_images = _validate_ref_images(inp)
+    if has_single and ref_images:
+        raise ValidationError(
+            "Provide either image_url/image_base64 or ref_images, not both.",
+            hint="ref_images replaces the single-image fields.",
+        )
+    if has_single:
+        ref_images = [
+            {"url": inp["image_url"]} if inp.get("image_url")
+            else {"base64": inp["image_base64"]}
+        ]
+    mode = "edit" if ref_images else "t2i"
 
     prompt = inp.get("prompt", "")
     if not isinstance(prompt, str):
@@ -134,8 +194,9 @@ def validate_input(inp: dict) -> dict:
 
     return {
         "mode": mode,
-        "image_url": inp.get("image_url"),
-        "image_base64": inp.get("image_base64"),
+        "ref_images": ref_images,
+        "image_url": ref_images[0].get("url") if ref_images else None,
+        "image_base64": ref_images[0].get("base64") if ref_images else None,
         "prompt": prompt,
         "negative_prompt": negative_prompt,
         "steps": steps,

@@ -70,6 +70,11 @@ MAX_PROMPT_LENGTH = 8000
 MAX_STEPS = 100
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 8192 * 8192
+# Reference images per job (the ref_images field). Qwen-Image 2.1's
+# encode node accepts up to 16, but every reference costs vision tokens
+# and the app's use case (character + outfit + pose references) is
+# served by 4, so the worker caps it there.
+MAX_REF_IMAGES = 4
 # Qwen-Image 2.1 supports direct output up to 2048x2048. On a 24 GB GPU
 # 1024x1024 is the comfortable size; the ceiling only guards against
 # absurd requests, it is not a recommendation.

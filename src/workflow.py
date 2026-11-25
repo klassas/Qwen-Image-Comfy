@@ -12,14 +12,18 @@ default in the official template and not wired here):
     VAELoader ──> VAEDecode.vae
     KSampler ──> VAEDecode ──> SaveImage
 
-Edit mode (a job with an input image) reuses the same graph with two
-changes, exactly as the official edit template does: the image is fed to
-TextEncodeQwenImage21 as `images.image_1` together with the VAE (so the
-encoder splices the reference's VAE latents into the sequence), and
-KSampler's latent_image comes from the encode node's own `latent` output
-— an empty latent on the (resized) reference's size — instead of
-EmptyLatentImage. Sampling runs at denoise 1.0: this is the model's
-instruction-edit path, not a classic img2img blend.
+Edit mode (a job with input images) reuses the same graph with two
+changes, exactly as the official edit template does: the images are fed
+to TextEncodeQwenImage21 as `images.image_1` .. `images.image_N`
+together with the VAE (so the encoder splices the references' VAE
+latents into the sequence), and KSampler's latent_image comes from the
+encode node's own `latent` output — an empty latent on the (resized)
+first reference's size — instead of EmptyLatentImage. Sampling runs at
+denoise 1.0: this is the model's instruction-edit path, not a classic
+img2img blend. A job may carry several references (the app sends up to
+four: e.g. character, outfit, pose); the first one is the edit base and
+drives the output size, the rest are visual references the prompt can
+point at ("the woman in image 1", ...).
 
 Node schemas verified against ComfyUI v0.46.2 source
 (comfy_extras/nodes_qwen.py): TextEncodeQwenImage21 inputs are clip /
@@ -48,14 +52,16 @@ def build_workflow(
     steps: int = 25,
     cfg: float = 1.0,
     image_name: str | None = None,
+    image_names: list[str] | None = None,
     edit_resolution: int = 1024,
     filename_prefix: str = "qwen_image/job",
 ) -> dict:
     """Returns the API-format graph: {node_id: {"class_type", "inputs"}}.
 
-    image_name: a file already uploaded to ComfyUI's input/ directory.
-    When given, the job is an edit of that image; otherwise text-to-image
-    at width x height.
+    image_names: files already uploaded to ComfyUI's input/ directory.
+    When given, the job is an edit/reference job over those images (the
+    first is the base); otherwise text-to-image at width x height.
+    image_name is the single-image shorthand kept for older callers.
     """
     nodes: dict[str, dict] = {
         "unet_loader": {
@@ -82,15 +88,27 @@ def build_workflow(
         "clip": ["clip_loader", 0],
         "prompt": prompt,
         "negative_prompt": negative_prompt,
+        # TextEncodeQwenImage21's resolution input is required in API
+        # format even for text-to-image (validation rejects the graph
+        # without it). It only resizes reference images, so with no
+        # references it is unused — but it must be present.
+        "resolution": edit_resolution,
     }
-    if image_name is not None:
-        nodes["load_image"] = {
-            "class_type": "LoadImage",
-            "inputs": {"image": image_name},
-        }
+    names: list[str] = list(image_names) if image_names else (
+        [image_name] if image_name else []
+    )
+    if names:
         encode_inputs["vae"] = ["vae_loader", 0]
-        encode_inputs["resolution"] = edit_resolution
-        encode_inputs["images.image_1"] = ["load_image", 0]
+        for i, name in enumerate(names):
+            # A single reference keeps the historical node id "load_image"
+            # (the Dockerfile's build-time graph check asserts on it);
+            # several get numbered ids.
+            node_id = "load_image" if len(names) == 1 else f"load_image_{i + 1}"
+            nodes[node_id] = {
+                "class_type": "LoadImage",
+                "inputs": {"image": name},
+            }
+            encode_inputs[f"images.image_{i + 1}"] = [node_id, 0]
         latent_ref = ["encode", 2]
     else:
         nodes["empty_latent"] = {

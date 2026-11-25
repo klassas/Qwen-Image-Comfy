@@ -1,10 +1,12 @@
 """Input-image download and decode (edit mode).
 
-Trimmed from the MiniMax-H3 worker's image.py: this worker takes at most
-one input image — the picture an edit job operates on. Returns None when
-the job provided none (a plain text-to-image request). No resizing here:
-TextEncodeQwenImage21 rescales the reference itself (its `resolution`
-input), so the image is uploaded to ComfyUI as-is.
+Trimmed from the MiniMax-H3 worker's image.py: a job carries up to
+config.MAX_REF_IMAGES input images (the validator's normalized
+`ref_images` list) — the first is the picture an edit job operates on,
+the rest are references. Returns an empty list when the job provided
+none (a plain text-to-image request). No resizing here:
+TextEncodeQwenImage21 rescales the references itself (its `resolution`
+input), so the images are uploaded to ComfyUI as-is.
 """
 
 import base64
@@ -18,13 +20,21 @@ from src.errors import DownloadError, ValidationError
 from src.security import validate_url
 
 
+def fetch_images(validated_input: dict) -> list:
+    """Fetch every reference image, in order. Empty list for t2i."""
+    out = []
+    for item in validated_input.get("ref_images") or []:
+        if item.get("url"):
+            out.append(_download_image(item["url"]))
+        elif item.get("base64"):
+            out.append(_decode_base64(item["base64"]))
+    return out
+
+
 def fetch_image(validated_input: dict) -> Image.Image | None:
-    """Fetch the edit target from image_url or image_base64. None for t2i."""
-    if validated_input.get("image_url"):
-        return _download_image(validated_input["image_url"])
-    if validated_input.get("image_base64"):
-        return _decode_base64(validated_input["image_base64"])
-    return None
+    """Fetch the first reference (the edit target). None for t2i."""
+    images = fetch_images(validated_input)
+    return images[0] if images else None
 
 
 def _download_image(url: str) -> Image.Image:

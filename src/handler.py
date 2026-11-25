@@ -9,8 +9,9 @@ handler owns is the RunPod job contract: validating input
 building the node graph (src/workflow.py), running it, and uploading the
 resulting PNG (src/storage.py).
 
-Mode is implicit: image_url/image_base64 present -> edit (the 2.1 model's
-instruction-edit graph); otherwise -> text-to-image.
+Mode is implicit: image_url/image_base64 or ref_images present -> edit
+(the 2.1 model's instruction-edit graph, up to config.MAX_REF_IMAGES
+references, the first being the edit base); otherwise -> text-to-image.
 """
 
 import io
@@ -28,7 +29,7 @@ import runpod
 from src import config, watchdog
 from src.comfy_client import ComfyClient, ComfyError, new_client_id
 from src.errors import InferenceError, ValidationError, format_error
-from src.image import fetch_image
+from src.image import fetch_images
 from src.model_link import ModelLinkError, link_model_cache
 from src.storage import upload_image
 from src.validator import validate_input
@@ -67,9 +68,21 @@ def _boot_comfy_bg() -> None:
         ]
         if config.COMFY_DISABLE_PINNED_MEMORY:
             comfy_args.append("--disable-pinned-memory")
+        # Put this worker's src/ dir on the subprocess's PYTHONPATH so
+        # Python auto-imports src/sitecustomize.py inside ComfyUI's
+        # interpreter at startup — that is where the cuDNN SDPA opt-out
+        # lives (see that file for why). Without it, Qwen-Image 2.1
+        # sampling dies in attention on this torch/cuDNN stack.
+        comfy_env = dict(os.environ)
+        src_dir = os.path.dirname(os.path.abspath(__file__))
+        existing_pp = comfy_env.get("PYTHONPATH")
+        comfy_env["PYTHONPATH"] = (
+            src_dir + os.pathsep + existing_pp if existing_pp else src_dir
+        )
         _comfy_process = subprocess.Popen(
             comfy_args,
             cwd=config.COMFY_DIR,
+            env=comfy_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -133,12 +146,13 @@ def _run_job(job_id: str, params: dict) -> dict:
             )
 
     t0 = time.perf_counter()
-    image_name = None
-    img = fetch_image(params)
-    if img is not None:
+    image_names: list[str] = []
+    for i, img in enumerate(fetch_images(params)):
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        image_name = _client.upload_image(buf.getvalue(), f"{job_id}_input.png")
+        image_names.append(
+            _client.upload_image(buf.getvalue(), f"{job_id}_input_{i + 1}.png")
+        )
     timings["preprocess_s"] = round(time.perf_counter() - t0, 3)
 
     seed = params["seed"]
@@ -154,7 +168,7 @@ def _run_job(job_id: str, params: dict) -> dict:
         seed=seed,
         steps=params["steps"],
         cfg=params["cfg_scale"],
-        image_name=image_name,
+        image_names=image_names or None,
         edit_resolution=params["edit_resolution"],
         filename_prefix=f"qwen_image/{job_id}",
     )
@@ -193,6 +207,7 @@ def _run_job(job_id: str, params: dict) -> dict:
 
     meta = {
         "mode": params["mode"],
+        "ref_images": len(image_names),
         "width": params["width"],
         "height": params["height"],
         "edit_resolution": params["edit_resolution"] if params["mode"] == "edit" else None,
@@ -218,6 +233,7 @@ def handler(job: dict) -> dict:
 
     Text-to-image: {"input": {"prompt": "..."}}
     Edit:          {"input": {"prompt": "...", "image_base64": "..."}}
+    Multi-ref:     {"input": {"prompt": "...", "ref_images": [{"base64": "..."}]}}
     Health:        {"input": {"op": "health"}}  (SERVE_MODE=api / Pod deploy path)
     """
     job_id = job.get("id", "unknown")
