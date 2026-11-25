@@ -43,6 +43,10 @@ This worker reads the flat fields, ignores `workflow`, and builds the
 real graph itself. With an image it runs the model's **edit** graph (the
 photo becomes the encode node's reference and sets the canvas); without
 one it runs text-to-image (default 1024×1024 when no size is sent).
+Instead of the single `image_base64`, the app may send `ref_images` —
+up to 4 `{"base64": ...}` objects (the R2V shape); the first is the edit
+base and sets the canvas, the rest are references the prompt can point
+at ("the woman in image 1", ...). The two forms are mutually exclusive.
 It returns:
 
 ```json
@@ -53,6 +57,27 @@ It returns:
 
 `image_url` is one of the keys the app's output parser looks for, so the
 existing app build works against this endpoint unchanged.
+
+## Extra LoRAs (optional, added 2026-11-25)
+
+Up to 3 LoRA slots, the same mechanism as the MiniMax H3 workers.
+Configure by env vars on the endpoint, then restart the worker (no
+rebuild): `EXTRA_LORA_KEY=<object key in the B2 bucket>` (or
+`EXTRA_LORA_URL=<direct https URL>` — a set URL wins) plus optional
+`EXTRA_LORA_STRENGTH=<0-2, default 0.5>`; slots 2/3 use the `_2` / `_3`
+suffixes. Files are fetched at boot into ComfyUI's models/loras; a
+configured-but-unfetchable LoRA fails the boot on purpose. In the graph
+the chain sits between UNETLoader and QwenImage21Cache, so the cache
+wraps the patched model. The app steers each slot per request with
+`lora_strength{,_2,_3}` (0 = slot skipped for that job). First LoRA
+fitted: "NSFW Qwen by TheseAlpacas V2.safetensors" (Civitai model
+2958918, v2.0) in slot 1 via EXTRA_LORA_KEY — a general NSFW LoRA for
+Qwen Image 2.1 (acts/positions/anatomy); and "nsfw-posture-v3.safetensors"
+(Civitai model 2988215, free, no triggers) in slot 2 via
+EXTRA_LORA_KEY_2 — a sexual-positions LoRA (first/third-person oral,
+breast sex, foot sex). Note: both authors recommend other samplers
+(er_sde / res_2s + beta) and cfg above 1, while this worker runs cfg 1
+/ euler — the first test will show how much that matters.
 
 ## Model files (from Comfy-Org/Qwen-Image-2.1)
 

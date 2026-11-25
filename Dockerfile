@@ -88,8 +88,21 @@ assert wf['encode']['class_type'] == 'TextEncodeQwenImage21', wf['encode']; \
 wf = build_workflow(prompt='make it blue', seed=1, image_name='in.png'); \
 assert wf['encode']['inputs']['images.image_1'] == ['load_image', 0], wf['encode']; \
 assert wf['sampler']['inputs']['latent_image'] == ['encode', 2], wf['sampler']; \
+wf = build_workflow(prompt='combine refs', seed=1, image_names=['a.png', 'b.png', 'c.png']); \
+assert wf['encode']['inputs']['images.image_1'] == ['load_image_1', 0], wf['encode']; \
+assert wf['encode']['inputs']['images.image_3'] == ['load_image_3', 0], wf['encode']; \
+assert wf['sampler']['inputs']['latent_image'] == ['encode', 2], wf['sampler']; \
+wf = build_workflow(prompt='lora', extra_loras=[('a.safetensors', 0.8), None, ('b.safetensors', 1.0)]); \
+assert wf['lora_extra']['inputs']['model'] == ['unet_loader', 0], wf['lora_extra']; \
+assert wf['model_cache']['inputs']['model'] == ['lora_extra_3', 0], wf['model_cache']; \
+assert wf['sampler']['inputs']['model'] == ['model_cache', 0], wf['sampler']; \
+assert 'lora_extra_2' not in wf, wf.keys(); \
 p = validate_input({'prompt': 'x', 'workflow': {'1': {}}, 'image_base64': 'AAAA'}); \
 assert p['mode'] == 'edit' and p['ignored_params'] == ['workflow'], p; \
+assert p['lora_strength'] == 0.5 and p['lora_strength_2'] == 0.5, p; \
+assert len(p['ref_images']) == 1 and p['ref_images'][0].get('base64') == 'AAAA', p; \
+p = validate_input({'prompt': 'x', 'ref_images': [{'base64': 'AAAA'}, {'url': 'https://example.com/a.png'}, 'BBBB']}); \
+assert p['mode'] == 'edit' and len(p['ref_images']) == 3, p; \
 print(f'All imports OK (tag={MODEL_TAG} model={model_tag()} repo={HF_REPO} comfy_dir={COMFY_DIR})')"
 
 # Only relevant when SERVE_MODE=api (the on-demand Pod deploy path, see
