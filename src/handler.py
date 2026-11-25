@@ -49,6 +49,43 @@ _client = ComfyClient(host=config.COMFY_HOST, port=config.COMFY_PORT)
 
 # -- ComfyUI subprocess boot ───────────────────────────────────────────────────
 
+_CUDNN_OPTOUT_NODE = '''"""Worker-installed: disable the cuDNN SDPA backend.
+
+On this stack (torch cu130 + cuDNN 9) the cuDNN SDPA backend fails inside
+attention with "cuDNN Frontend error: No valid execution plans built";
+PyTorch's flash / mem-efficient SDPA backends handle the same shapes
+fine. Convolutions keep using cuDNN — only SDPA backend selection is
+opted out. Written by the worker's handler.py at boot; do not edit here.
+"""
+
+try:
+    import torch
+
+    torch.backends.cuda.enable_cudnn_sdp(False)
+except Exception:
+    pass
+
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
+'''
+
+
+def _install_cudnn_optout_node() -> None:
+    """Drop the cuDNN SDPA opt-out into ComfyUI's custom_nodes/ so ComfyUI
+    imports it during its own startup (after torch is loaded, before any
+    generation). Best-effort: a failure here must not block the boot."""
+    try:
+        node_dir = os.path.join(
+            config.COMFY_DIR, "custom_nodes", "zz_cudnn_sdp_optout"
+        )
+        os.makedirs(node_dir, exist_ok=True)
+        with open(os.path.join(node_dir, "__init__.py"), "w") as f:
+            f.write(_CUDNN_OPTOUT_NODE)
+        logger.info("Installed cuDNN SDPA opt-out custom node in %s", node_dir)
+    except Exception:
+        logger.exception("Could not install cuDNN SDPA opt-out node; continuing")
+
+
 def _boot_comfy_bg() -> None:
     """Symlink the Model Cache snapshot into ComfyUI's models/ tree, launch
     ComfyUI, and wait for its HTTP server to answer. Runs on a background
@@ -68,21 +105,20 @@ def _boot_comfy_bg() -> None:
         ]
         if config.COMFY_DISABLE_PINNED_MEMORY:
             comfy_args.append("--disable-pinned-memory")
-        # Put this worker's src/ dir on the subprocess's PYTHONPATH so
-        # Python auto-imports src/sitecustomize.py inside ComfyUI's
-        # interpreter at startup — that is where the cuDNN SDPA opt-out
-        # lives (see that file for why). Without it, Qwen-Image 2.1
-        # sampling dies in attention on this torch/cuDNN stack.
-        comfy_env = dict(os.environ)
-        src_dir = os.path.dirname(os.path.abspath(__file__))
-        existing_pp = comfy_env.get("PYTHONPATH")
-        comfy_env["PYTHONPATH"] = (
-            src_dir + os.pathsep + existing_pp if existing_pp else src_dir
-        )
+        # The cuDNN SDPA opt-out must NOT be applied by importing torch
+        # before ComfyUI starts (the old sitecustomize.py route): ComfyUI
+        # 0.46's cuda_malloc module sets
+        # PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync before torch is
+        # imported, and PyTorch asserts at CUDA init when the allocator
+        # backend parsed at load time (native, because torch was already
+        # imported) differs from the runtime one (cudaMallocAsync) —
+        # ComfyUI dies instantly at startup. A custom node is imported by
+        # ComfyUI itself during startup, after torch, so the flag lands
+        # before any sampling call instead.
+        _install_cudnn_optout_node()
         _comfy_process = subprocess.Popen(
             comfy_args,
             cwd=config.COMFY_DIR,
-            env=comfy_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
