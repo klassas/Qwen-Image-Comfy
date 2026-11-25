@@ -49,19 +49,36 @@ _client = ComfyClient(host=config.COMFY_HOST, port=config.COMFY_PORT)
 
 # -- ComfyUI subprocess boot ───────────────────────────────────────────────────
 
-_CUDNN_OPTOUT_NODE = '''"""Worker-installed: disable the cuDNN SDPA backend.
+_CUDNN_OPTOUT_NODE = '''"""Worker-installed: keep SDPA away from the cuDNN backend.
 
 On this stack (torch cu130 + cuDNN 9) the cuDNN SDPA backend fails inside
-attention with "cuDNN Frontend error: No valid execution plans built";
-PyTorch's flash / mem-efficient SDPA backends handle the same shapes
-fine. Convolutions keep using cuDNN — only SDPA backend selection is
-opted out. Written by the worker's handler.py at boot; do not edit here.
+Qwen-Image 2.1 attention with "cuDNN Frontend error: No valid execution
+plans built" (seen on RTX A5000 and PRO 6000 MIG). Setting
+torch.backends.cuda.enable_cudnn_sdp(False) alone is NOT enough:
+ComfyUI 0.46's comfy/ops.py wraps every SDPA call in
+sdpa_kernel(SDPA_BACKEND_PRIORITY, set_priority=True), and that priority
+list re-enables the cuDNN backend inside the context. So this module
+also removes CUDNN_ATTENTION from comfy.ops.SDPA_BACKEND_PRIORITY,
+leaving FLASH -> EFFICIENT -> MATH. Convolutions keep using cuDNN.
+Written by the worker's handler.py at boot; do not edit here.
 """
 
 try:
     import torch
 
     torch.backends.cuda.enable_cudnn_sdp(False)
+except Exception:
+    pass
+
+try:
+    import comfy.ops
+    from torch.nn.attention import SDPBackend
+
+    comfy.ops.SDPA_BACKEND_PRIORITY = [
+        backend
+        for backend in comfy.ops.SDPA_BACKEND_PRIORITY
+        if backend != SDPBackend.CUDNN_ATTENTION
+    ]
 except Exception:
     pass
 
