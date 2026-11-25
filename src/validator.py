@@ -138,6 +138,22 @@ def validate_input(inp: dict) -> dict:
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise ValidationError("seed must be an integer.")
 
+    # Per-request LoRA strengths (0-2). Defaults come from the endpoint's
+    # EXTRA_LORA_STRENGTH{,_2,_3} env vars; 0 skips that slot for the job.
+    def _strength(field: str, default: float) -> float:
+        v = inp.get(field, default)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) \
+                or v < 0 or v > 2:
+            raise ValidationError(
+                f"{field} must be a number between 0 and 2.",
+                hint=f"You sent {field}={v!r}.",
+            )
+        return float(v)
+
+    lora_strength = _strength("lora_strength", config.EXTRA_LORA_STRENGTH)
+    lora_strength_2 = _strength("lora_strength_2", config.EXTRA_LORA_STRENGTH_2)
+    lora_strength_3 = _strength("lora_strength_3", config.EXTRA_LORA_STRENGTH_3)
+
     # Size: both-or-neither. The app only ever sends the pair (with an
     # image, to keep its aspect ratio); a plain t2i request sends neither
     # and gets the defaults.
@@ -202,6 +218,9 @@ def validate_input(inp: dict) -> dict:
         "steps": steps,
         "cfg_scale": float(cfg_scale),
         "seed": seed,
+        "lora_strength": lora_strength,
+        "lora_strength_2": lora_strength_2,
+        "lora_strength_3": lora_strength_3,
         "width": width,
         "height": height,
         "edit_resolution": edit_resolution,

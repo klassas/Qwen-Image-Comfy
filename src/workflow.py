@@ -55,6 +55,7 @@ def build_workflow(
     image_names: list[str] | None = None,
     edit_resolution: int = 1024,
     filename_prefix: str = "qwen_image/job",
+    extra_loras: list | None = None,
 ) -> dict:
     """Returns the API-format graph: {node_id: {"class_type", "inputs"}}.
 
@@ -68,11 +69,36 @@ def build_workflow(
             "class_type": "UNETLoader",
             "inputs": {"unet_name": UNET_NAME, "weight_dtype": "default"},
         },
+    }
+
+    # Optional LoRA chain on the model branch: UNETLoader -> [LoRA x N]
+    # -> QwenImage21Cache -> KSampler.model. The cache wraps the final
+    # (patched) model, so the LoRAs go before it. Slots that are None
+    # (not configured, or set to strength 0 for this job) are skipped.
+    model_ref = ["unet_loader", 0]
+    for i, item in enumerate(extra_loras or []):
+        if not item:
+            continue
+        lora_name, lora_strength = item
+        if not lora_name:
+            continue
+        node_id = "lora_extra" if i == 0 else f"lora_extra_{i + 1}"
+        nodes[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": model_ref,
+                "lora_name": lora_name,
+                "strength_model": float(lora_strength),
+            },
+        }
+        model_ref = [node_id, 0]
+
+    nodes.update({
         # KV-cache placement for the 2.1 transformer; the official
         # templates keep the defaults ('auto' device, lossless dtype).
         "model_cache": {
             "class_type": "QwenImage21Cache",
-            "inputs": {"model": ["unet_loader", 0], "device": "auto", "dtype": "default"},
+            "inputs": {"model": model_ref, "device": "auto", "dtype": "default"},
         },
         "clip_loader": {
             "class_type": "CLIPLoader",
@@ -82,7 +108,7 @@ def build_workflow(
             "class_type": "VAELoader",
             "inputs": {"vae_name": VAE_NAME},
         },
-    }
+    })
 
     encode_inputs: dict = {
         "clip": ["clip_loader", 0],

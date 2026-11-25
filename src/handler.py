@@ -31,7 +31,7 @@ from src.comfy_client import ComfyClient, ComfyError, new_client_id
 from src.errors import InferenceError, ValidationError, format_error
 from src.image import fetch_images
 from src.model_link import ModelLinkError, link_model_cache
-from src.storage import upload_image
+from src.storage import download_extra_loras, upload_image
 from src.validator import validate_input
 from src.workflow import CLIP_NAME, OUTPUT_NODE_ID, UNET_NAME, VAE_NAME, build_workflow
 
@@ -43,6 +43,9 @@ logger = logging.getLogger("qwen-image-comfy")
 
 _COMFY_READY = threading.Event()
 _COMFY_ERROR: Exception | None = None
+# Extra LoRA filenames fetched at boot (one entry per slot, None when a
+# slot is not configured). Filled by _boot_comfy_bg.
+_EXTRA_LORA_NAMES: list = [None, None, None]
 _comfy_process: subprocess.Popen | None = None
 _client = ComfyClient(host=config.COMFY_HOST, port=config.COMFY_PORT)
 
@@ -108,11 +111,20 @@ def _boot_comfy_bg() -> None:
     ComfyUI, and wait for its HTTP server to answer. Runs on a background
     thread so request validation can overlap the boot, same pattern as the
     MiniMax-H3 worker."""
-    global _COMFY_ERROR, _comfy_process
+    global _COMFY_ERROR, _comfy_process, _EXTRA_LORA_NAMES
     try:
         logger.info("Linking Model Cache snapshot into ComfyUI models/...")
         snapshot_root = link_model_cache(os.path.join(config.COMFY_DIR, "models"))
         logger.info("Model weights linked from %s", snapshot_root)
+
+        # Extra LoRAs (if any slot is configured) are fetched before
+        # ComfyUI starts, so a configured-but-unfetchable LoRA fails the
+        # boot loudly instead of silently generating without it.
+        _EXTRA_LORA_NAMES = download_extra_loras(
+            os.path.join(config.COMFY_DIR, "models", "loras")
+        )
+        if any(_EXTRA_LORA_NAMES):
+            logger.info("Extra LoRAs ready: %s", _EXTRA_LORA_NAMES)
 
         logger.info("Starting ComfyUI subprocess in %s", config.COMFY_DIR)
         comfy_args = [
@@ -213,6 +225,13 @@ def _run_job(job_id: str, params: dict) -> dict:
         import random
         seed = random.randint(0, 2**32 - 1)
 
+    lora_keys = ["lora_strength", "lora_strength_2", "lora_strength_3"]
+    extra_loras = [
+        (_EXTRA_LORA_NAMES[i], params[lora_keys[i]])
+        if _EXTRA_LORA_NAMES[i] and params[lora_keys[i]] > 0 else None
+        for i in range(3)
+    ]
+
     workflow = build_workflow(
         prompt=params["prompt"],
         negative_prompt=params["negative_prompt"],
@@ -224,6 +243,7 @@ def _run_job(job_id: str, params: dict) -> dict:
         image_names=image_names or None,
         edit_resolution=params["edit_resolution"],
         filename_prefix=f"qwen_image/{job_id}",
+        extra_loras=extra_loras,
     )
 
     client_id = new_client_id()
@@ -269,6 +289,11 @@ def _run_job(job_id: str, params: dict) -> dict:
         "cfg_scale": params["cfg_scale"],
         "model": config.model_tag(),
         "ignored_params": params["ignored_params"],
+        "loras": [
+            {"name": _EXTRA_LORA_NAMES[i], "strength": params[lora_keys[i]]}
+            if _EXTRA_LORA_NAMES[i] else {"name": None, "strength": 0}
+            for i in range(3)
+        ],
     }
 
     return {

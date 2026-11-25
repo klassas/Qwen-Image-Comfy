@@ -7,6 +7,8 @@ instead of an mp4.
 
 import logging
 import os
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 import boto3
@@ -92,3 +94,95 @@ def upload_image(
 
     logger.info("Upload complete: %s", url)
     return url
+
+
+def _download_one_lora(key: str, dest_dir: str) -> str:
+    """Fetch one LoRA object from the default bucket into dest_dir.
+    Returns the local filename. Raises UploadError when unfetchable."""
+    bucket = config.S3_BUCKET_DEFAULT
+    if not bucket:
+        raise UploadError(
+            "An extra LoRA is configured but no S3 bucket is set.",
+            hint="Set S3_BUCKET_DEFAULT so the worker can fetch the LoRA file.",
+        )
+    name = os.path.basename(key)
+    dest = os.path.join(dest_dir, name)
+    if os.path.exists(dest):
+        logger.info("Extra LoRA already present: %s", dest)
+        return name
+    os.makedirs(dest_dir, exist_ok=True)
+    client = _get_s3_client()
+    logger.info("Downloading extra LoRA s3://%s/%s -> %s", bucket, key, dest)
+    try:
+        client.download_file(bucket, key, dest)
+    except Exception as e:
+        raise UploadError(
+            f"Extra LoRA download failed: {e}",
+            hint=f"Check the key {key!r} matches the object key in the bucket.",
+        )
+    logger.info(
+        "Extra LoRA ready: %s (%.1f MB)",
+        dest, os.path.getsize(dest) / (1024 * 1024),
+    )
+    return name
+
+
+def _download_lora_from_url(url: str, dest_dir: str) -> str:
+    """Fetch one LoRA over HTTP(S) into dest_dir. Returns the local
+    filename (the basename of the URL path). For LoRAs too large for the
+    storage web UI's upload limit, the worker pulls the file itself at
+    boot. Raises UploadError when unfetchable."""
+    name = os.path.basename(urllib.parse.urlparse(url).path)
+    if not name:
+        raise UploadError(
+            f"Extra LoRA URL has no filename: {url!r}",
+            hint="Use a URL that ends with the .safetensors filename.",
+        )
+    dest = os.path.join(dest_dir, name)
+    if os.path.exists(dest):
+        logger.info("Extra LoRA already present: %s", dest)
+        return name
+    os.makedirs(dest_dir, exist_ok=True)
+    tmp = dest + ".part"
+    logger.info("Downloading extra LoRA %s -> %s", url, dest)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as f:
+            while True:
+                chunk = resp.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp, dest)
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise UploadError(
+            f"Extra LoRA URL download failed: {e}",
+            hint=f"Check the URL {url!r} is reachable.",
+        )
+    logger.info(
+        "Extra LoRA ready: %s (%.1f MB)",
+        dest, os.path.getsize(dest) / (1024 * 1024),
+    )
+    return name
+
+
+def download_extra_loras(dest_dir: str) -> list:
+    """Fetch every configured extra LoRA (config.EXTRA_LORAS /
+    config.EXTRA_LORA_URLS) into dest_dir (ComfyUI's models/loras).
+    A slot with a URL set downloads from that URL; otherwise a set key
+    downloads from the default bucket. Returns a list with one entry per
+    slot: the local filename, or None when that slot is not configured.
+    A configured-but-unfetchable LoRA raises UploadError: silently
+    generating without a LoRA the caller explicitly set up would hand
+    back the wrong image."""
+    names = []
+    for (key, _strength), url in zip(config.EXTRA_LORAS, config.EXTRA_LORA_URLS):
+        if url:
+            names.append(_download_lora_from_url(url, dest_dir))
+        elif key:
+            names.append(_download_one_lora(key, dest_dir))
+        else:
+            names.append(None)
+    return names

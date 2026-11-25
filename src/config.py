@@ -83,6 +83,30 @@ MIN_DIMENSION = 128
 IMAGE_DOWNLOAD_TIMEOUT = 10
 UPLOAD_TIMEOUT = 60
 
+# -- Extra LoRAs (optional, up to 3 slots) ────────────────────────────────────
+# Same mechanism as the MiniMax H3 / H3 Image workers: slots are
+# configured by env vars, files are fetched at boot, and the app steers
+# each slot per request with lora_strength{,_2,_3} (0 = slot skipped for
+# that job). EXTRA_LORA_KEY{,_2,_3} are object keys in the default S3
+# bucket; EXTRA_LORA_URL{,_2,_3} is the alternative source for a slot (a
+# set URL wins over that slot's key). Changing LoRAs needs only an env
+# edit and a worker restart, never a rebuild.
+EXTRA_LORA_KEY = os.getenv("EXTRA_LORA_KEY", "")
+EXTRA_LORA_STRENGTH = float(os.getenv("EXTRA_LORA_STRENGTH", "0.5"))
+EXTRA_LORA_KEY_2 = os.getenv("EXTRA_LORA_KEY_2", "")
+EXTRA_LORA_STRENGTH_2 = float(os.getenv("EXTRA_LORA_STRENGTH_2", "0.5"))
+EXTRA_LORA_KEY_3 = os.getenv("EXTRA_LORA_KEY_3", "")
+EXTRA_LORA_STRENGTH_3 = float(os.getenv("EXTRA_LORA_STRENGTH_3", "0.5"))
+EXTRA_LORAS = [
+    (EXTRA_LORA_KEY, EXTRA_LORA_STRENGTH),
+    (EXTRA_LORA_KEY_2, EXTRA_LORA_STRENGTH_2),
+    (EXTRA_LORA_KEY_3, EXTRA_LORA_STRENGTH_3),
+]
+EXTRA_LORA_URL = os.getenv("EXTRA_LORA_URL", "")
+EXTRA_LORA_URL_2 = os.getenv("EXTRA_LORA_URL_2", "")
+EXTRA_LORA_URL_3 = os.getenv("EXTRA_LORA_URL_3", "")
+EXTRA_LORA_URLS = [EXTRA_LORA_URL, EXTRA_LORA_URL_2, EXTRA_LORA_URL_3]
+
 # Fields the app sends that this worker accepts and drops: `workflow` is
 # the placeholder asset the app still ships for the old third-party Qwen
 # endpoint — this worker builds its graph in code (src/workflow.py), same
